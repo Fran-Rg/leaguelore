@@ -1,0 +1,1 @@
+scrapy runspider leaguelore/spiders/champions.py

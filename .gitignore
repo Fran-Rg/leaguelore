@@ -1,6 +1,15 @@
+#Here
+*.html
+*.epub
+*.csv
+*.jpg
+*.json
+*.db
+meta.json
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
+*.pynot
 *$py.class
 
 # C extensions

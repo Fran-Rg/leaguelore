@@ -1,0 +1,114 @@
+name: LoL lore ebook builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      dburl:
+        description: 'Download db url'
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get info max number of champions
+        id: champ-count
+        run: |
+          LAST_VERSION=`curl -s https://ddragon.leagueoflegends.com/api/versions.json | jq -r '.[0]'`
+          CHAMP_COUNT=`curl -s http://ddragon.leagueoflegends.com/cdn/${LAST_VERSION}/data/en_US/champion.json | jq '.data | length'`
+          echo "Riot API last champ count: $CHAMP_COUNT"
+          echo "CHAMP_COUNT=$CHAMP_COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Get info about latest release
+        id: last-release
+        run: |
+          RELEASE_JSON=$(curl -s -H 'Authorization: token ${{ secrets.GITHUB_TOKEN }}' 'https://api.github.com/repos/${{ github.repository }}/releases/latest')
+
+          LATEST_RELEASE_NAME=$(echo "$RELEASE_JSON" | jq -r '.name')
+          LATEST_RELEASE_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
+          if [ "$LATEST_RELEASE_NAME" == "null" ]; then
+            LATEST_RELEASE_TAG="lollore-0"
+          fi
+
+          LATEST_RELEASE_CHAMP_COUNT=${LATEST_RELEASE_TAG#"lollore-"}
+
+          echo "Latest release name: $LATEST_RELEASE_NAME"
+          echo "Latest release champ count: $LATEST_RELEASE_CHAMP_COUNT"
+          echo "PREVIOUS_CHAMP_COUNT=$LATEST_RELEASE_CHAMP_COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Mask
+        if: ${{ inputs.dburl != '' }}
+        run: |
+          DBURL=$(jq -r '.inputs.dburl' $GITHUB_EVENT_PATH)
+          echo ::add-mask::$DBURL
+
+      - name: Download from url
+        if: ${{ inputs.dburl != '' }}
+        run: |
+           curl '${{ inputs.dburl }}' -L -s -o lore.db
+
+      - name: Download latest DB
+        if: ${{ steps.champ-count.outputs.CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT && inputs.dburl == '' }}
+        uses: Fran-Rg/action-download-last-artifact@main
+        with:
+          name: lore.db
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        if: ${{ steps.champ-count.outputs.CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT && inputs.dburl == '' }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      - name: Requirements
+        if: ${{ steps.champ-count.outputs.CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT && inputs.dburl == '' }}
+        run: |
+          chmod +x ./install.sh
+          ./install.sh
+
+      - name: Run scrapper
+        id: scrapy
+        if: ${{ steps.champ-count.outputs.CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT }}
+        run: |
+          chmod +x ./scrap.sh
+          ./scrap.sh
+
+      - name: Upload updated DB
+        uses: actions/upload-artifact@v4
+        if: ${{ steps.champ-count.outputs.CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT || inputs.dburl != '' }}
+        with:
+          name: lore.db
+          path: |
+            lore.db
+
+      - name: Run kindler
+        id: kindle
+        if: ${{ steps.champ-count.outputs.CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT }}
+        run: |
+          python kindle.py
+          echo "NEW_CHAMP_COUNT=$(jq -r '.champ_count' meta.json)" >> "$GITHUB_OUTPUT"
+          HAS_ALL_CHAMPS=$(jq -r '.allchamps' meta.json)
+          echo "HAS_ALL_CHAMPS=$HAS_ALL_CHAMPS" >> "$GITHUB_OUTPUT"
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        if: ${{ steps.kindle.outputs.HAS_ALL_CHAMPS == 'true' && steps.kindle.outputs.NEW_CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT }}
+        with:
+          name: "League of Legends lore - ${{ steps.kindle.outputs.NEW_CHAMP_COUNT }} Champions"
+          tag_name: "lollore-${{ steps.kindle.outputs.NEW_CHAMP_COUNT }}"
+          target_commitish: ${{ github.sha }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          generate_release_notes: false
+          fail_on_unmatched_files: true
+          files: |
+            *.epub
