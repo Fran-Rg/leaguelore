@@ -233,7 +233,8 @@ class LeagueloreCharacterSpider(scrapy.Spider):
             logging.error("No bio for '%s': %s", name, response.url)
 
     def parse_bio(self, response, **kwargs):
-        bio = "".join(i.get() for i in response.xpath('//*[@id="CatchElement"]/*'))
+        # bio = "".join(i.get() for i in response.xpath('//*[@id="CatchElement"]/*'))
+        bio = response.css(".root_3nvd.dark_1RHo").get()
 
         image_url = response.css("div.image_3oOd.backgroundImage_5wQJ")[0].attrib[
             "data-am-url"
@@ -265,7 +266,7 @@ class LeagueloreCharacterSpider(scrapy.Spider):
             yield champ_parse
 
     def parse_story(self, response, **kwargs):
-        story = "".join(i.get() for i in response.xpath('//*[@id="CatchElement"]/*'))
+        story = response.css(".root_3nvd.dark_1RHo").get()
         champ_parse = {"story": story} | kwargs
         self.save_champ(champ_parse)
         yield champ_parse

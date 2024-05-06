@@ -65,13 +65,13 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
-        if: ${{ steps.champ-count.outputs.CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT && inputs.dburl == '' }}
+        if: ${{ steps.champ-count.outputs.CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT || inputs.dburl != '' }}
         uses: actions/setup-python@v4
         with:
           python-version: "3.12"
 
       - name: Requirements
-        if: ${{ steps.champ-count.outputs.CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT && inputs.dburl == '' }}
+        if: ${{ steps.champ-count.outputs.CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT || inputs.dburl != '' }}
         run: |
           chmod +x ./install.sh
           ./install.sh
