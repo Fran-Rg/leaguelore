@@ -17,3 +17,6 @@ This repo automatically scrap, save and compile the stories from all playable ch
 
 ## Any issue? Feature request?
 Raise them at [Issues](/../../issues)
+
+## License
+The code is under MIT license. Exception for League of Legends and all related logos, characters, names and distinctive likenesses thereof are exclusive property of Riot Games, Inc.  All Rights Reserved.
