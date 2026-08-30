@@ -60,6 +60,7 @@ jobs:
       - name: Download latest DB
         if: ${{ steps.champ-count.outputs.CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT && inputs.dburl == '' }}
         uses: Fran-Rg/action-download-last-artifact@main
+        continue-on-error: true
         with:
           name: lore.db
           token: ${{ secrets.GITHUB_TOKEN }}
