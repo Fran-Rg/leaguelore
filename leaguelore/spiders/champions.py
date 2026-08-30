@@ -90,8 +90,8 @@ class LeagueloreCharacterSpider(scrapy.Spider):
         logging.info("Starting")
         self.build_db()
         for lang in LANGS:
-            if lang != "zh_CN":
-                continue # DEBUG
+            # if lang != "zh_CN":
+            #     continue # DEBUG
             yield scrapy.Request(
                 "https://yz.lol.qq.com/zh_CN/champions/"
                 if lang == "zh_CN"
