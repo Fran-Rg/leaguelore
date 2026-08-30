@@ -86,7 +86,7 @@ class LeagueloreCharacterSpider(scrapy.Spider):
         )
         """)
 
-    def start_requests(self):
+    async def start(self):
         print("Starting")
         self.build_db()
         for lang in LANGS:
