@@ -3,6 +3,7 @@
 *.epub
 *.csv
 *.jpg
+!imgs/*.jpg
 *.json
 *.db
 meta.json

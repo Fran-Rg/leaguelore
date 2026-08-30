@@ -1,1 +1,1 @@
-scrapy runspider leaguelore/spiders/champions.py
+scrapy -L=INFO crawl champions

@@ -36,9 +36,9 @@ def download_champ_img(name, image_url):
             im.save(safe_img_path, optimize=True, quality=95)
             im_stats = os.stat(safe_img_path)
             logging.debug(
-                "Reduced '%s' to '%s x %s' : size %s" % (name, x2, y2, im_stats.st_size)
+                "Reduced '%s' to '%s x %s' : size %s", name, x2, y2, im_stats.st_size
             )
-        print("Img '%s' at '%s x %s' : size %s" % (name, x2, y2, im_stats.st_size))
+        logging.info("Img '%s' at '%s x %s' : size %s", name, x2, y2, im_stats.st_size)
 
 
 async def wait_page(response):
@@ -87,9 +87,11 @@ class LeagueloreCharacterSpider(scrapy.Spider):
         """)
 
     async def start(self):
-        print("Starting")
+        logging.info("Starting")
         self.build_db()
         for lang in LANGS:
+            if lang != "zh_CN":
+                continue # DEBUG
             yield scrapy.Request(
                 "https://yz.lol.qq.com/zh_CN/champions/"
                 if lang == "zh_CN"
@@ -106,11 +108,12 @@ class LeagueloreCharacterSpider(scrapy.Spider):
             time.sleep(1)
 
     def parse(self, response, **kwargs):
-        print("Starting Champions '%s'" % kwargs["lang"])
+        logging.info("[%s]Starting Champions Lore Parsing", kwargs["lang"])
         champ_blocks = response.css("li.item_30l8")
-        print(
-            "Found new champs (%s)? %s"
-            % (len(champ_blocks), len(champ_blocks) > PREVIOUS_CHAMP_COUNT)
+        logging.info(
+            "Found new champs (%s)? %s",
+            len(champ_blocks),
+            len(champ_blocks) > PREVIOUS_CHAMP_COUNT,
         )
         if len(champ_blocks) > PREVIOUS_CHAMP_COUNT:
             for champion in champ_blocks:
@@ -122,16 +125,12 @@ class LeagueloreCharacterSpider(scrapy.Spider):
                 )
                 result = self.cur.fetchone()
 
-                # If it is in DB, create log message
                 if result:
-                    pass
-                    # print(
-                    #     "[%s]%s already in database"
-                    #     % (
-                    #         kwargs["lang"],
-                    #         champ_code,
-                    #     )
-                    # )
+                    logging.info(
+                        "[%s]%s already in database",
+                        kwargs["lang"],
+                        champ_code,
+                    )
                 else:
                     cb_kwargs = {"champion": champ_code} | kwargs
                     champ_page = response.urljoin(champ_url)
@@ -173,7 +172,7 @@ class LeagueloreCharacterSpider(scrapy.Spider):
         )
 
         name = response.css("title::text")[0].get().split(" - ")[0]
-        title = response.css("h3.subheadline_rlsJ::text")[0].get()
+        title = response.css("h3.subheadline_rlsJ::text").get()
         quote = (
             response.css("li.quote_2507 p::text").get()
             or response.css("li.quote_2507 p i::text").get()
@@ -197,9 +196,8 @@ class LeagueloreCharacterSpider(scrapy.Spider):
                 ]
             ),
         } | kwargs
-        print(
-            "'%s' Cur champ parse: '%s[%s]'"
-            % (kwargs["lang"], kwargs["champion"], name)
+        logging.info(
+            "[%s]Cur champ parse: '%s[%s]'", kwargs["lang"], kwargs["champion"], name
         )
         bio_url = next(
             (
@@ -211,8 +209,13 @@ class LeagueloreCharacterSpider(scrapy.Spider):
         )
         if bio_url is None:
             bio_url = "/%s/story/champion/%s/" % (kwargs["lang"], name.lower())
-            logging.error("first bio url is null for: %s", champ_parse)
-        # print("[%s]Bio URL %s" % (response.url, bio_url))
+            logging.error(
+                "[%s]first bio url is null for: '%s[%s]'",
+                kwargs["lang"],
+                champ_parse["champion"],
+                champ_parse["name"],
+            )
+        # logging.info("[%s]Bio URL %s",response.url, bio_url)
         if bio_url is not None:
             bio_page = response.urljoin(bio_url)
             # logging.error("bio_page %s", bio_page)
@@ -243,7 +246,7 @@ class LeagueloreCharacterSpider(scrapy.Spider):
 
         champ_parse = {"bio": bio} | kwargs
         story_link = response.css("a.root_K4Th")
-        # print("[%s]story_link %s" % (response.url, story_link))
+        # logging.info("[%s]story_link %s",response.url, story_link)
         if len(response.css("a.root_K4Th")) > 0:
             story_url = story_link[0].attrib["href"]
             request = scrapy.Request(
@@ -260,7 +263,12 @@ class LeagueloreCharacterSpider(scrapy.Spider):
             )
             yield request
         else:
-            logging.error("No Story for '%s'", kwargs["name"])
+            logging.error(
+                "[%s]No Story for '%s[%s]'",
+                kwargs["lang"],
+                kwargs["champion"],
+                response.url,
+            )
             champ_parse = {"story": ""} | champ_parse
             self.save_champ(champ_parse)
             yield champ_parse
@@ -272,7 +280,7 @@ class LeagueloreCharacterSpider(scrapy.Spider):
         yield champ_parse
 
     def save_champ(self, c):
-        print("Saving [%s]%s to DB" % (c["lang"], c["champion"]))
+        logging.info("[%s]Saving %s to DB", c["lang"], c["champion"])
         self.cur.execute(
             """
                 INSERT INTO champions(

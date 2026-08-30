@@ -1,6 +1,8 @@
 name: LoL lore ebook builder
 
 on:
+  schedule:
+    - cron: '10 13 1 * *'  # Run on the 1st of every month at 13:10 UTC
   workflow_dispatch:
     inputs:
       dburl:
@@ -14,13 +16,14 @@ permissions:
   contents: write
 
 jobs:
-  build:
-
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      champ-count: ${{ steps.champ-count.outputs.CHAMP_COUNT }}
+      previous-count: ${{ steps.last-release.outputs.PREVIOUS_CHAMP_COUNT }}
+      should-build: ${{ steps.champ-count.outputs.CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT || inputs.dburl != '' }}
 
     steps:
-      - uses: actions/checkout@v4
-
       - name: Get info max number of champions
         id: champ-count
         run: |
@@ -45,6 +48,14 @@ jobs:
           echo "Latest release name: $LATEST_RELEASE_NAME"
           echo "Latest release champ count: $LATEST_RELEASE_CHAMP_COUNT"
           echo "PREVIOUS_CHAMP_COUNT=$LATEST_RELEASE_CHAMP_COUNT" >> "$GITHUB_OUTPUT"
+  build:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should-build == 'true' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
 
       - name: Mask
         if: ${{ inputs.dburl != '' }}
@@ -58,7 +69,7 @@ jobs:
            curl '${{ inputs.dburl }}' -L -s -o lore.db
 
       - name: Download latest DB
-        if: ${{ steps.champ-count.outputs.CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT && inputs.dburl == '' }}
+        if: ${{ inputs.dburl == '' }}
         uses: Fran-Rg/action-download-last-artifact@main
         continue-on-error: true
         with:
@@ -66,27 +77,25 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
-        if: ${{ steps.champ-count.outputs.CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT || inputs.dburl != '' }}
         uses: actions/setup-python@v4
         with:
           python-version: "3.12"
 
       - name: Requirements
-        if: ${{ steps.champ-count.outputs.CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT || inputs.dburl != '' }}
         run: |
           chmod +x ./install.sh
           ./install.sh
 
       - name: Run scrapper
         id: scrapy
-        if: ${{ steps.champ-count.outputs.CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT }}
         run: |
           chmod +x ./scrap.sh
+          ./scrap.sh
+          # Idempotent so let's try another time
           ./scrap.sh
 
       - name: Upload updated DB
         uses: actions/upload-artifact@v4
-        if: ${{ steps.champ-count.outputs.CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT || inputs.dburl != '' }}
         with:
           name: lore.db
           path: |
@@ -94,7 +103,6 @@ jobs:
 
       - name: Run kindler
         id: kindle
-        if: ${{ steps.champ-count.outputs.CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT }}
         run: |
           python kindle.py
           echo "NEW_CHAMP_COUNT=$(jq -r '.champ_count' meta.json)" >> "$GITHUB_OUTPUT"
@@ -103,7 +111,7 @@ jobs:
 
       - name: Release
         uses: softprops/action-gh-release@v2
-        if: ${{ steps.kindle.outputs.HAS_ALL_CHAMPS == 'true' && steps.kindle.outputs.NEW_CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT }}
+        if: ${{ steps.kindle.outputs.HAS_ALL_CHAMPS == 'true' && steps.kindle.outputs.NEW_CHAMP_COUNT != needs.prepare.outputs.previous-count }}
         with:
           name: "League of Legends lore - ${{ steps.kindle.outputs.NEW_CHAMP_COUNT }} Champions"
           tag_name: "lollore-${{ steps.kindle.outputs.NEW_CHAMP_COUNT }}"
