@@ -4,12 +4,6 @@ on:
   schedule:
     - cron: '10 13 1 * *'  # Run on the 1st of every month at 13:10 UTC
   workflow_dispatch:
-    inputs:
-      dburl:
-        description: 'Download db url'
-        required: false
-        type: string
-        default: ""
 
 permissions:
   actions: read
