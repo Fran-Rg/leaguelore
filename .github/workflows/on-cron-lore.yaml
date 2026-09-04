@@ -16,65 +16,16 @@ permissions:
   contents: write
 
 jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    outputs:
-      champ-count: ${{ steps.champ-count.outputs.CHAMP_COUNT }}
-      previous-count: ${{ steps.last-release.outputs.PREVIOUS_CHAMP_COUNT }}
-      should-build: ${{ steps.champ-count.outputs.CHAMP_COUNT != steps.last-release.outputs.PREVIOUS_CHAMP_COUNT || inputs.dburl != '' }}
-
-    steps:
-      - name: Get info max number of champions
-        id: champ-count
-        run: |
-          LAST_VERSION=`curl -s https://ddragon.leagueoflegends.com/api/versions.json | jq -r '.[0]'`
-          CHAMP_COUNT=`curl -s http://ddragon.leagueoflegends.com/cdn/${LAST_VERSION}/data/en_US/champion.json | jq '.data | length'`
-          echo "Riot API last champ count: $CHAMP_COUNT"
-          echo "CHAMP_COUNT=$CHAMP_COUNT" >> "$GITHUB_OUTPUT"
-
-      - name: Get info about latest release
-        id: last-release
-        run: |
-          RELEASE_JSON=$(curl -s -H 'Authorization: token ${{ secrets.GITHUB_TOKEN }}' 'https://api.github.com/repos/${{ github.repository }}/releases/latest')
-
-          LATEST_RELEASE_NAME=$(echo "$RELEASE_JSON" | jq -r '.name')
-          LATEST_RELEASE_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
-          if [ "$LATEST_RELEASE_NAME" == "null" ]; then
-            LATEST_RELEASE_TAG="lollore-0"
-          fi
-
-          LATEST_RELEASE_CHAMP_COUNT=${LATEST_RELEASE_TAG#"lollore-"}
-
-          echo "Latest release name: $LATEST_RELEASE_NAME"
-          echo "Latest release champ count: $LATEST_RELEASE_CHAMP_COUNT"
-          echo "PREVIOUS_CHAMP_COUNT=$LATEST_RELEASE_CHAMP_COUNT" >> "$GITHUB_OUTPUT"
   build:
-    needs: prepare
-    if: ${{ needs.prepare.outputs.should-build == 'true' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v7
-
-
-      - name: Mask
-        if: ${{ inputs.dburl != '' }}
-        run: |
-          DBURL=$(jq -r '.inputs.dburl' $GITHUB_EVENT_PATH)
-          echo ::add-mask::$DBURL
-
-      - name: Download from url
-        if: ${{ inputs.dburl != '' }}
-        run: |
-           curl '${{ inputs.dburl }}' -L -s -o lore.db
-
-      - name: Download latest DB
-        if: ${{ inputs.dburl == '' }}
-        uses: Fran-Rg/action-download-last-artifact@main
-        continue-on-error: true
         with:
-          name: lore.db
           token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -85,39 +36,63 @@ jobs:
         run: |
           chmod +x ./install.sh
           ./install.sh
+          echo "TODAYDATE=$(date +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
 
       - name: Run scrapper
         id: scrapy
         run: |
           chmod +x ./scrap.sh
           ./scrap.sh
-          # Idempotent so let's try another time
-          ./scrap.sh
-
-      - name: Upload updated DB
-        uses: actions/upload-artifact@v4
-        with:
-          name: lore.db
-          path: |
-            lore.db
 
       - name: Run kindler
         id: kindle
         run: |
           python kindle.py
           echo "NEW_CHAMP_COUNT=$(jq -r '.champ_count' meta.json)" >> "$GITHUB_OUTPUT"
-          HAS_ALL_CHAMPS=$(jq -r '.allchamps' meta.json)
-          echo "HAS_ALL_CHAMPS=$HAS_ALL_CHAMPS" >> "$GITHUB_OUTPUT"
+
+      - name: Commit scraped assets
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A imgs/*.jpg
+          if git diff --cached --quiet; then
+            echo "Nothing to commit"
+          else
+            git commit -m "chore: update champion images"
+            git pull --rebase
+            git push
+          fi
 
       - name: Release
         uses: softprops/action-gh-release@v2
-        if: ${{ steps.kindle.outputs.HAS_ALL_CHAMPS == 'true' && steps.kindle.outputs.NEW_CHAMP_COUNT != needs.prepare.outputs.previous-count }}
         with:
-          name: "League of Legends lore - ${{ steps.kindle.outputs.NEW_CHAMP_COUNT }} Champions"
-          tag_name: "lollore-${{ steps.kindle.outputs.NEW_CHAMP_COUNT }}"
+          name: "League of Legends lore - ${{ steps.kindle.outputs.NEW_CHAMP_COUNT }} Champions - ${{ steps.requirements.outputs.TODAYDATE }}"
+          tag_name: "lollore-${{ steps.kindle.outputs.NEW_CHAMP_COUNT }}-${{ steps.requirements.outputs.TODAYDATE }}"
           target_commitish: ${{ github.sha }}
           token: ${{ secrets.GITHUB_TOKEN }}
           generate_release_notes: false
           fail_on_unmatched_files: true
+          make_latest: "true"
           files: |
             *.epub
+            lore.db
+
+      - name: Prune releases older than 3 months
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP_TAG: "lollore-${{ steps.kindle.outputs.NEW_CHAMP_COUNT }}-${{ steps.requirements.outputs.TODAYDATE }}"
+        run: |
+          cutoff=$(date -u -d '3 months ago' +'%Y-%m-%dT%H:%M:%SZ')
+          latest_tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name' || echo "")
+          echo "Deleting releases created before $cutoff (keeping '$KEEP_TAG' and latest '$latest_tag')"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq '.[] | [.tag_name, .created_at] | @tsv' \
+          | while IFS=$'\t' read -r tag created; do
+              if [[ "$tag" == "$KEEP_TAG" || "$tag" == "$latest_tag" ]]; then
+                continue
+              fi
+              if [[ "$created" < "$cutoff" ]]; then
+                echo "Deleting release '$tag' (created $created)"
+                gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+              fi
+            done

@@ -2,7 +2,6 @@ from ebooklib import epub
 from PIL import Image
 import sqlite3
 
-import csv
 import io
 from itertools import groupby
 from operator import itemgetter
@@ -14,6 +13,13 @@ from translations import TRANSLATIONS, LANGS
 
 def get_safe_img_path(name):
     return "imgs/%s.jpg" % "".join([c for c in name if re.match(r"\w", c)])
+
+
+def story_title(story):
+    if story["title"]:
+        return story["title"]
+    slug = story["url"].strip("/").split("/")[-1]
+    return slug.replace("-", " ").capitalize()
 
 
 def write_book(data, lang):
@@ -96,9 +102,11 @@ def write_book(data, lang):
                 "<h2>%s</h2>" % TRANSLATIONS[lang]["bio"],
                 "<p>%s</p>" % d["bio"],
             ]
-            if d["story"] != "":
+            if len(d["stories"]) > 0:
                 content.append("<h2>%s</h2>" % TRANSLATIONS[lang]["story"])
-                content.append("<p>%s</p>" % d["story"])
+                for s in d["stories"]:
+                    content.append("<h3>%s</h3>" % story_title(s))
+                    content.append("<p>%s</p>" % s["content"])
             c.content = "".join(content)
 
             # add chapter
@@ -161,6 +169,14 @@ def load():
     cur = con.cursor()
     cur.execute("select * from champions;")
     data = cur.fetchall()
+
+    cur.execute("select * from stories order by url;")
+    stories = {}
+    for s in cur.fetchall():
+        stories.setdefault((s["champion"], s["lang"]), []).append(s)
+    for c in data:
+        c["stories"] = stories.get((c["champion"], c["lang"]), [])
+
     data.sort(key=itemgetter("lang"))
     countries_data = {
         region: [c for c in cdata]

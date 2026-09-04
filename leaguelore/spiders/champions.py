@@ -10,13 +10,71 @@ import os
 import os.path
 import math
 import re
+import shutil
+import tempfile
+from datetime import datetime, timezone
 
 from scrapy_playwright.page import PageMethod
+from scrapy.utils.project import data_path
 
 from translations import LANGS
 # "https://universe.leagueoflegends.com/%s/champions/"
 
-PREVIOUS_CHAMP_COUNT = int(os.environ.get("PREVIOUS_CHAMP_COUNT", "0"))
+DEBUG = os.environ.get("DEBUG", "") != ""
+
+DB_PATH = "lore.db"
+DB_REPO = os.environ.get("LORE_DB_REPO", "Fran-Rg/leaguelore")
+DB_ASSET_NAME = os.environ.get("LORE_DB_ASSET", DB_PATH)
+
+
+def _latest_db_asset():
+    resp = requests.get(
+        "https://api.github.com/repos/%s/releases/latest" % DB_REPO,
+        headers={"Accept": "application/vnd.github+json"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    for asset in resp.json().get("assets", []):
+        if asset.get("name") == DB_ASSET_NAME:
+            updated = datetime.strptime(
+                asset["updated_at"], "%Y-%m-%dT%H:%M:%SZ"
+            ).replace(tzinfo=timezone.utc)
+            return asset["browser_download_url"], updated.timestamp()
+    return None, None
+
+
+def fetch_db():
+    """Download lore.db from the latest GitHub release when missing or stale."""
+    local_mtime = os.path.getmtime(DB_PATH) if os.path.isfile(DB_PATH) else None
+    try:
+        url, remote_mtime = _latest_db_asset()
+    except requests.RequestException as e:
+        logging.warning("Could not check latest '%s' release: %s", DB_REPO, e)
+        return
+    if url is None:
+        logging.warning("No '%s' asset in latest '%s' release", DB_ASSET_NAME, DB_REPO)
+        return
+    if local_mtime is not None and local_mtime >= remote_mtime:
+        logging.info("'%s' is up to date with latest release", DB_PATH)
+        return
+
+    logging.info("Downloading '%s' from %s", DB_PATH, url)
+    with requests.get(url, stream=True, timeout=120) as resp:
+        resp.raise_for_status()
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=os.path.dirname(os.path.abspath(DB_PATH)), suffix=".part"
+        )
+        try:
+            with os.fdopen(tmp_fd, "wb") as handler:
+                for chunk in resp.iter_content(chunk_size=1024 * 256):
+                    handler.write(chunk)
+            os.replace(tmp_path, DB_PATH)
+        except BaseException:
+            os.unlink(tmp_path)
+            raise
+    # Keep the release timestamp so later runs can compare against it
+    os.utime(DB_PATH, (remote_mtime, remote_mtime))
+    logging.info("Downloaded '%s' (%s bytes)", DB_PATH, os.path.getsize(DB_PATH))
 
 
 def download_champ_img(name, image_url):
@@ -51,6 +109,7 @@ async def wait_page(response):
 class LeagueloreCharacterSpider(scrapy.Spider):
     name = "champions"
     allowed_domains = ["universe.leagueoflegends.com", "yz.lol.qq.com"]
+    handle_httpstatus_list = [404]
 
     def clean(self, s):
         return re.sub(r" *\n +", " ", s.strip()) if s is not None else ""
@@ -62,8 +121,28 @@ class LeagueloreCharacterSpider(scrapy.Spider):
             else ""
         )
 
+    def drop_cache(self, request):
+        fp = self.crawler.request_fingerprinter.fingerprint(request).hex()
+        cachedir = data_path(self.settings["HTTPCACHE_DIR"] or "httpcache")
+        shutil.rmtree(
+            os.path.join(cachedir, self.name, fp[0:2], fp), ignore_errors=True
+        )
+
+    def get_champion(self, lang, champion):
+        self.cur.execute(
+            "select * from champions where champion = ? AND lang = ?",
+            (champion, lang),
+        )
+        return self.cur.fetchone()
+
+    def get_story(self, url):
+        self.cur.execute("select * from stories where url = ?", (url,))
+        return self.cur.fetchone()
+
     def build_db(self):
-        self.con = sqlite3.connect("lore.db")
+        fetch_db()
+        self.con = sqlite3.connect(DB_PATH)
+        self.con.row_factory = sqlite3.Row
 
         ## Create cursor, used to execute commands
         self.cur = self.con.cursor()
@@ -74,7 +153,6 @@ class LeagueloreCharacterSpider(scrapy.Spider):
             champion TEXT,
             name TEXT,
             lang TEXT,
-            story TEXT,
             bio TEXT,
             race TEXT,
             title TEXT,
@@ -82,16 +160,28 @@ class LeagueloreCharacterSpider(scrapy.Spider):
             region TEXT,
             quote TEXT,
             short_bio TEXT,
-            related_champions TEXT
+            related_champions TEXT,
+            PRIMARY KEY (champion, lang)
+        )
+        """)
+
+        self.cur.execute("""
+        CREATE TABLE IF NOT EXISTS stories(
+            url TEXT PRIMARY KEY,
+            champion TEXT,
+            lang TEXT,
+            title TEXT,
+            content TEXT
         )
         """)
 
     async def start(self):
         logging.info("Starting")
         self.build_db()
+        time.sleep(1)
         for lang in LANGS:
-            # if lang != "zh_CN":
-            #     continue # DEBUG
+            if DEBUG and lang != "en_US":
+                continue  # DEBUG
             yield scrapy.Request(
                 "https://yz.lol.qq.com/zh_CN/champions/"
                 if lang == "zh_CN"
@@ -105,124 +195,174 @@ class LeagueloreCharacterSpider(scrapy.Spider):
                     ],
                 },
             )
-            time.sleep(1)
 
     def parse(self, response, **kwargs):
         logging.info("[%s]Starting Champions Lore Parsing", kwargs["lang"])
         champ_blocks = response.css("li.item_30l8")
-        logging.info(
-            "Found new champs (%s)? %s",
-            len(champ_blocks),
-            len(champ_blocks) > PREVIOUS_CHAMP_COUNT,
-        )
-        if len(champ_blocks) > PREVIOUS_CHAMP_COUNT:
-            for champion in champ_blocks:
-                champ_url = champion.css("a")[0].attrib["href"]
-                champ_code = champ_url.split("/")[-2]
-                self.cur.execute(
-                    "select * from champions where champion = ? AND lang = ?",
-                    (champ_code, kwargs["lang"]),
-                )
-                result = self.cur.fetchone()
-
-                if result:
-                    logging.info(
-                        "[%s]%s already in database",
-                        kwargs["lang"],
-                        champ_code,
-                    )
-                else:
-                    cb_kwargs = {"champion": champ_code} | kwargs
-                    champ_page = response.urljoin(champ_url)
-                    yield scrapy.Request(
-                        champ_page,
-                        cb_kwargs=cb_kwargs,
-                        callback=self.parse_champion,
-                        meta={
-                            "playwright": True,
-                            "playwright_page_methods": [
-                                PageMethod("wait_for_load_state", "domcontentloaded"),
-                                PageMethod("wait_for_timeout", 2000),
-                            ],
-                        },
-                    )
-        elif len(champ_blocks) == 0:
+        if len(champ_blocks) == 0:
             logging.error(
                 "'%s' unable to load champions, skipping: %s",
                 kwargs["lang"],
                 response.url,
             )
         else:
-            logging.error("No new champs found stopping...")
-            self.crawler.engine.close_spider(self, "No new champs found")
+            for champion in champ_blocks:
+                champ_url = champion.css("a")[0].attrib["href"]
+                champ_code = champ_url.split("/")[-2]
+
+                cb_kwargs = {"champion": champ_code} | kwargs
+                champ_page = response.urljoin(champ_url)
+                yield scrapy.Request(
+                    champ_page,
+                    cb_kwargs=cb_kwargs,
+                    callback=self.parse_champion,
+                    meta={
+                        "playwright": True,
+                        "playwright_page_methods": [
+                            PageMethod("wait_for_load_state", "domcontentloaded"),
+                            PageMethod("wait_for_timeout", 2000),
+                        ],
+                    },
+                )
 
     def parse_champion(self, response, **kwargs):
-        role = (
-            response.css(".typeDescription_ixWu h6 span::text").get()
-            or response.css(".typeDescription_ixWu h6::text").get()
+        retry_count = kwargs.pop("retry_count", 0)
+        # Riot serves valid champion pages with a 404 status, so only trust the in-page marker
+        is_404 = response.css("h3.code_Xnqs::text").get() == "404"
+        # The region module is sometimes missing when the page hasn't finished hydrating
+        is_incomplete = (
+            not response.css(".factionText_EnRL h6 span::text").get()
+            and not response.css("a.link_3m7v")
         )
-        race = (
-            response.css(".race_3k58 h6 span::text").get()
-            or response.css(".race_3k58 h6::text").get()
-        )
-        short_bio = (
-            response.css(".biographyText_3-to p::text").get()
-            or response.css(".biographyText_3-to::text").get()
-            or response.css(".biographyText_3-to p i::text").get()
-        )
-
-        name = response.css("title::text")[0].get().split(" - ")[0]
-        title = response.css("h3.subheadline_rlsJ::text").get()
-        quote = (
-            response.css("li.quote_2507 p::text").get()
-            or response.css("li.quote_2507 p i::text").get()
-        )
-        region = (
-            response.css(".factionText_EnRL h6 span::text").get()
-            or response.css("a.link_3m7v")[0].attrib["href"].split("/")[-2].title()
-        )
-        champ_parse = {
-            "name": name,
-            "race": race,
-            "title": title,
-            "role": role,
-            "region": region,
-            "quote": self.quote_clean(quote),
-            "short_bio": self.clean(short_bio),
-            "related_champions": ",".join(
-                [
-                    i.css("a h5::text").get()
-                    for i in response.css("ul.champions_jmhN li")
-                ]
-            ),
-        } | kwargs
-        logging.info(
-            "[%s]Cur champ parse: '%s[%s]'", kwargs["lang"], kwargs["champion"], name
-        )
-        bio_url = next(
-            (
-                i.attrib.get("href")
-                for i in response.css("a")
-                if i.attrib.get("href", "").startswith("/%s/story/" % kwargs["lang"])
-            ),
-            None,
-        )
-        if bio_url is None:
-            bio_url = "/%s/story/champion/%s/" % (kwargs["lang"], name.lower())
-            logging.error(
-                "[%s]first bio url is null for: '%s[%s]'",
+        if is_404 or is_incomplete:
+            if retry_count >= 5:
+                logging.error(
+                    "[%s]Gave up after %s retries on incomplete page for '%s': %s",
+                    kwargs["lang"],
+                    retry_count,
+                    kwargs["champion"],
+                    response.url,
+                )
+                return
+            logging.warning(
+                "[%s]%s for '%s', clearing cache and retrying (%s): %s",
                 kwargs["lang"],
-                champ_parse["champion"],
-                champ_parse["name"],
+                "404" if is_404 else "Incomplete page",
+                kwargs["champion"],
+                retry_count + 1,
+                response.url,
             )
-        # logging.info("[%s]Bio URL %s",response.url, bio_url)
-        if bio_url is not None:
-            bio_page = response.urljoin(bio_url)
-            # logging.error("bio_page %s", bio_page)
-            request = scrapy.Request(
-                bio_page,
-                callback=self.parse_bio,
-                cb_kwargs=champ_parse,
+            self.drop_cache(response.request)
+            yield scrapy.Request(
+                response.url,
+                callback=self.parse_champion,
+                cb_kwargs=kwargs | {"retry_count": retry_count + 1},
+                dont_filter=True,
+                meta={
+                    "playwright": True,
+                    "playwright_page_methods": [
+                        PageMethod("wait_for_load_state", "domcontentloaded"),
+                        PageMethod("wait_for_timeout", (retry_count + 1) * 1000),
+                    ],
+                },
+            )
+            return
+        ex_c = self.get_champion(kwargs["lang"], kwargs["champion"])
+        if ex_c is None or ex_c["bio"] is None:
+            logging.info(
+                "[%s]Parsing '%s' : %s", kwargs["lang"], kwargs["champion"], response.url
+            )
+
+            role = (
+                response.css(".typeDescription_ixWu h6 span::text").get()
+                or response.css(".typeDescription_ixWu h6::text").get()
+            )
+            race = (
+                response.css(".race_3k58 h6 span::text").get()
+                or response.css(".race_3k58 h6::text").get()
+            )
+            short_bio = (
+                response.css(".biographyText_3-to p::text").get()
+                or response.css(".biographyText_3-to::text").get()
+                or response.css(".biographyText_3-to p i::text").get()
+            )
+
+            name = response.css("title::text")[0].get().split(" - ")[0]
+            title = response.css("h3.subheadline_rlsJ::text").get()
+            quote = (
+                response.css("li.quote_2507 p::text").get()
+                or response.css("li.quote_2507 p i::text").get()
+            )
+            region = (
+                response.css(".factionText_EnRL h6 span::text").get()
+                or response.css("a.link_3m7v")[0].attrib["href"].split("/")[-2].title()
+            )
+            champ_parse = {
+                "name": name,
+                "race": race,
+                "title": title,
+                "role": role,
+                "region": region,
+                "quote": self.quote_clean(quote),
+                "short_bio": self.clean(short_bio),
+                "related_champions": ",".join(
+                    [
+                        i.css("a h5::text").get()
+                        for i in response.css("ul.champions_jmhN li")
+                    ]
+                ),
+            } | kwargs
+            logging.info(
+                "[%s]Cur champ parse: '%s[%s]'", kwargs["lang"], kwargs["champion"], name
+            )
+            bio_url = next(
+                (
+                    i.attrib.get("href")
+                    for i in response.css("a")
+                    if i.attrib.get("href", "").startswith("/%s/story/" % kwargs["lang"])
+                ),
+                None,
+            )
+            if bio_url is None:
+                bio_url = "/%s/story/champion/%s/" % (kwargs["lang"], name.lower())
+                logging.error(
+                    "[%s]first bio url is null for: '%s[%s]'",
+                    kwargs["lang"],
+                    kwargs["champion"],
+                    champ_parse["name"],
+                )
+            # logging.info("[%s]Bio URL %s",response.url, bio_url)
+            if bio_url is not None:
+                bio_page = response.urljoin(bio_url)
+                # logging.error("bio_page %s", bio_page)
+                request = scrapy.Request(
+                    bio_page,
+                    callback=self.parse_bio,
+                    cb_kwargs=champ_parse,
+                    meta={
+                        "playwright": True,
+                        "playwright_page_methods": [
+                            PageMethod("wait_for_load_state", "domcontentloaded"),
+                            PageMethod("wait_for_timeout", 1000),
+                        ],
+                    },
+                )
+                yield request
+            else:
+                logging.error("No bio for '%s': %s", name, response.url)
+
+        story_urls = response.xpath(
+            '//span[@data-gettext-identifier="module-story-cta"]/ancestor::a[1]/@href'
+        ).getall()
+        for story_url in story_urls:
+            story_page = response.urljoin(story_url)
+            if self.get_story(story_page) is not None:
+                logging.debug("[%s]Story already in database: %s", kwargs["lang"], story_page)
+                continue
+            yield scrapy.Request(
+                story_page,
+                callback=self.parse_story,
+                cb_kwargs={"champion": kwargs["champion"], "lang": kwargs["lang"]},
                 meta={
                     "playwright": True,
                     "playwright_page_methods": [
@@ -231,13 +371,19 @@ class LeagueloreCharacterSpider(scrapy.Spider):
                     ],
                 },
             )
-            yield request
-        else:
-            logging.error("No bio for '%s': %s", name, response.url)
 
     def parse_bio(self, response, **kwargs):
         # bio = "".join(i.get() for i in response.xpath('//*[@id="CatchElement"]/*'))
         bio = response.css(".root_3nvd.dark_1RHo").get()
+        if bio is None:
+            logging.error(
+                "[%s]No bio content for '%s', clearing cache: %s",
+                kwargs["lang"],
+                kwargs["champion"],
+                response.url,
+            )
+            self.drop_cache(response.request)
+            return
 
         image_url = response.css("div.image_3oOd.backgroundImage_5wQJ")[0].attrib[
             "data-am-url"
@@ -245,14 +391,30 @@ class LeagueloreCharacterSpider(scrapy.Spider):
         download_champ_img(kwargs["champion"], image_url)
 
         champ_parse = {"bio": bio} | kwargs
-        story_link = response.css("a.root_K4Th")
-        # logging.info("[%s]story_link %s",response.url, story_link)
-        if len(response.css("a.root_K4Th")) > 0:
-            story_url = story_link[0].attrib["href"]
-            request = scrapy.Request(
+        self.save_champ(champ_parse)
+        yield champ_parse
+
+        story_links = response.css("a.root_K4Th")
+        if len(story_links) == 0:
+            logging.warning(
+                "[%s]No Story from bio for '%s[%s]'",
+                kwargs["lang"],
+                kwargs["champion"],
+                response.url,
+            )
+            return
+
+        for link in story_links:
+            story_url = link.attrib["href"]
+            if self.get_story(story_url) is not None:
+                logging.debug(
+                    "[%s]Story already in database: %s", kwargs["lang"], story_url
+                )
+                continue
+            yield scrapy.Request(
                 response.urljoin(story_url),
                 callback=self.parse_story,
-                cb_kwargs=champ_parse,
+                cb_kwargs={"champion": kwargs["champion"], "lang": kwargs["lang"]},
                 meta={
                     "playwright": True,
                     "playwright_page_methods": [
@@ -261,33 +423,62 @@ class LeagueloreCharacterSpider(scrapy.Spider):
                     ],
                 },
             )
-            yield request
-        else:
-            logging.error(
-                "[%s]No Story for '%s[%s]'",
-                kwargs["lang"],
-                kwargs["champion"],
-                response.url,
-            )
-            champ_parse = {"story": ""} | champ_parse
-            self.save_champ(champ_parse)
-            yield champ_parse
 
     def parse_story(self, response, **kwargs):
-        story = response.css(".root_3nvd.dark_1RHo").get()
-        champ_parse = {"story": story} | kwargs
-        self.save_champ(champ_parse)
-        yield champ_parse
+        retry_count = kwargs.pop("retry_count", 0)
+        content = response.css(".root_3nvd.dark_1RHo").get()
+        if content is None:
+            if retry_count >= 5:
+                logging.error(
+                    "[%s]Gave up after %s retries on empty story: %s",
+                    kwargs["lang"],
+                    retry_count,
+                    response.url,
+                )
+                return
+            logging.warning(
+                "[%s]No story content, clearing cache and retrying (%s): %s",
+                kwargs["lang"],
+                retry_count + 1,
+                response.url,
+            )
+            self.drop_cache(response.request)
+            yield scrapy.Request(
+                response.url,
+                callback=self.parse_story,
+                cb_kwargs=kwargs | {"retry_count": retry_count + 1},
+                dont_filter=True,
+                meta={
+                    "playwright": True,
+                    "playwright_page_methods": [
+                        PageMethod("wait_for_load_state", "domcontentloaded"),
+                        PageMethod("wait_for_timeout", 1000),
+                    ],
+                },
+            )
+            return
+
+        story = {
+            "url": response.url,
+            "champion": kwargs["champion"],
+            "lang": kwargs["lang"],
+            "title": self.clean(
+                response.css("div.noHeaderTitle_1n0i::text").get()
+                or response.css("h1.title_121J::text").get()
+            ),
+            "content": content,
+        }
+        self.save_story(story)
+        yield story
 
     def save_champ(self, c):
         logging.info("[%s]Saving %s to DB", c["lang"], c["champion"])
         self.cur.execute(
             """
-                INSERT INTO champions(
+                INSERT OR REPLACE INTO champions(
             champion,
             name,
             lang,
-            story,
             bio,
             race,
             title,
@@ -296,13 +487,12 @@ class LeagueloreCharacterSpider(scrapy.Spider):
             quote,
             short_bio,
             related_champions
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 c["champion"],
                 c["name"],
                 c["lang"],
-                c["story"],
                 c["bio"],
                 c["race"],
                 c["title"],
@@ -312,5 +502,18 @@ class LeagueloreCharacterSpider(scrapy.Spider):
                 c["short_bio"],
                 c["related_champions"],
             ),
+        )
+        self.con.commit()
+
+    def save_story(self, s):
+        logging.info(
+            "Saving story '%s' for %s to DB -> %s", s["title"], s["champion"], s["url"]
+        )
+        self.cur.execute(
+            """
+            INSERT OR REPLACE INTO stories(url, champion, lang, title, content)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (s["url"], s["champion"], s["lang"], s["title"], s["content"]),
         )
         self.con.commit()

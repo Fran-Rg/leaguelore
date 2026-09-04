@@ -24,19 +24,19 @@ NEWSPIDER_MODULE = "leaguelore.spiders"
 ROBOTSTXT_OBEY = True
 
 # Configure maximum concurrent requests performed by Scrapy (default: 16)
-CONCURRENT_REQUESTS = 3
-CONCURRENT_REQUESTS_PER_DOMAIN = 3
+CONCURRENT_REQUESTS = 12
+CONCURRENT_REQUESTS_PER_DOMAIN = 12
 AUTOTHROTTLE_ENABLED = True
-AUTOTHROTTLE_START_DELAY = 2
+AUTOTHROTTLE_START_DELAY = 1
 AUTOTHROTTLE_MAX_DELAY = 10
-AUTOTHROTTLE_TARGET_CONCURRENCY = 0.5
+AUTOTHROTTLE_TARGET_CONCURRENCY = 8
 
 CLOSESPIDER_ERRORCOUNT = 100
 
 # Configure a delay for requests for the same website (default: 0)
 # See https://docs.scrapy.org/en/latest/topics/settings.html#download-delay
 # See also autothrottle settings and docs
-DOWNLOAD_DELAY = 2  # 2 seconds between requests
+DOWNLOAD_DELAY = 0.25
 RANDOMIZE_DOWNLOAD_DELAY = True
 # The download delay setting will honor only one of:
 # CONCURRENT_REQUESTS_PER_DOMAIN = 16
@@ -70,6 +70,14 @@ PLAYWRIGHT_LAUNCH_OPTIONS = {
     "headless": True,
     "timeout": 20 * 1000,  # 20 seconds
 }
+PLAYWRIGHT_MAX_PAGES_PER_CONTEXT = 12
+
+
+def _abort_request(request):
+    return request.resource_type in ("image", "media", "font", "stylesheet")
+
+
+PLAYWRIGHT_ABORT_REQUEST = _abort_request
 DOWNLOAD_HANDLERS = {
     "http": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
     "https": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
