@@ -34,6 +34,8 @@ jobs:
 
       - name: Run scrapper
         id: scrapy
+        env:
+          DEBUG: 1
         run: |
           chmod +x ./scrap.sh
           ./scrap.sh
@@ -43,19 +45,6 @@ jobs:
         run: |
           python kindle.py
           echo "NEW_CHAMP_COUNT=$(jq -r '.champ_count' meta.json)" >> "$GITHUB_OUTPUT"
-
-      - name: Commit scraped assets
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A imgs/*.jpg
-          if git diff --cached --quiet; then
-            echo "Nothing to commit"
-          else
-            git commit -m "chore: update champion images"
-            git pull --rebase
-            git push
-          fi
 
       - name: Release
         uses: softprops/action-gh-release@v2
