@@ -24,12 +24,13 @@ NEWSPIDER_MODULE = "leaguelore.spiders"
 ROBOTSTXT_OBEY = True
 
 # Configure maximum concurrent requests performed by Scrapy (default: 16)
-CONCURRENT_REQUESTS = 12
-CONCURRENT_REQUESTS_PER_DOMAIN = 12
+# Above ~4 the site's data fetches start failing and the app renders its 404 route
+CONCURRENT_REQUESTS = 4
+CONCURRENT_REQUESTS_PER_DOMAIN = 4
 AUTOTHROTTLE_ENABLED = True
 AUTOTHROTTLE_START_DELAY = 1
 AUTOTHROTTLE_MAX_DELAY = 10
-AUTOTHROTTLE_TARGET_CONCURRENCY = 8
+AUTOTHROTTLE_TARGET_CONCURRENCY = 4
 
 CLOSESPIDER_ERRORCOUNT = 100
 
@@ -70,14 +71,18 @@ PLAYWRIGHT_LAUNCH_OPTIONS = {
     "headless": True,
     "timeout": 20 * 1000,  # 20 seconds
 }
-PLAYWRIGHT_MAX_PAGES_PER_CONTEXT = 12
+PLAYWRIGHT_MAX_PAGES_PER_CONTEXT = 4
 
 
 def _abort_request(request):
-    return request.resource_type in ("image", "media", "font", "stylesheet")
+    # Stylesheets must load: the app does not render its champion modules without them
+    return request.resource_type in ("image", "media", "font")
 
 
 PLAYWRIGHT_ABORT_REQUEST = _abort_request
+# goto() returns early; the real waiting is done per-request via wait_for_selector
+PLAYWRIGHT_NAVIGATION_WAIT_UNTIL = "domcontentloaded"
+PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT = 20 * 1000
 DOWNLOAD_HANDLERS = {
     "http": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
     "https": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
@@ -111,7 +116,7 @@ DOWNLOAD_HANDLERS = {
 # Enable and configure HTTP caching (disabled by default)
 # See https://docs.scrapy.org/en/latest/topics/downloader-middleware.html#httpcache-middleware-settings
 HTTPCACHE_ENABLED = True
-# HTTPCACHE_EXPIRATION_SECS = 0
+HTTPCACHE_EXPIRATION_SECS = 24 * 60 * 60
 # HTTPCACHE_DIR = "httpcache"
 # HTTPCACHE_IGNORE_HTTP_CODES = []
 # HTTPCACHE_STORAGE = "scrapy.extensions.httpcache.FilesystemCacheStorage"

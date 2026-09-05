@@ -48,13 +48,6 @@ TRANSLATIONS = {
         "bio": "Életrajz",
         "story": "Sztori",
     },
-    "id_ID": {
-        "region": "Wilayah",
-        "role": "Peran",
-        "related": "Terkait",
-        "bio": "Biografi",
-        "story": "Cerita",
-    },
     "it_IT": {
         "region": "Regione",
         "role": "Ruolo",

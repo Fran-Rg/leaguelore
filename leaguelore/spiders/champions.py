@@ -16,11 +16,49 @@ from datetime import datetime, timezone
 
 from scrapy_playwright.page import PageMethod
 from scrapy.utils.project import data_path
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from translations import LANGS
 # "https://universe.leagueoflegends.com/%s/champions/"
 
 DEBUG = os.environ.get("DEBUG", "") != ""
+MAX_RETRY_COUNT = 3
+
+CHAMP_LIST_SELECTOR = "li.item_30l8"
+# Some champion/locale pairs render no faction module, so gate on the always-present
+# biography/type modules instead
+CHAMP_PAGE_SELECTOR = ".biographyText_3-to, .typeDescription_ixWu, h3.subheadline_rlsJ"
+STORY_SELECTOR = ".root_3nvd.dark_1RHo"
+NOT_FOUND_SELECTOR = "h3.code_Xnqs"
+HYDRATION_TIMEOUT = 8000
+PAGE_RELOADS = 3
+
+
+async def wait_hydrated(page, selector, timeout):
+    """Wait for content, reloading while the app is stuck on its 404 route."""
+    for attempt in range(PAGE_RELOADS):
+        await page.wait_for_selector(selector, state="attached", timeout=timeout)
+        try:
+            # Every page paints a 404 module before route data resolves; on real
+            # pages it detaches, so its absence is what marks the page as hydrated
+            await page.wait_for_selector(
+                NOT_FOUND_SELECTOR, state="detached", timeout=HYDRATION_TIMEOUT
+            )
+            return
+        except PlaywrightTimeoutError:
+            # A failed data fetch drops the app onto its 404 route; a reload recovers it
+            if attempt == PAGE_RELOADS - 1:
+                raise
+            await page.reload(wait_until="domcontentloaded")
+
+
+def page_meta(selector, retry_count=0):
+    timeout = 20000 + retry_count * 10000
+    return {
+        "playwright": True,
+        "wait_selector": selector,
+        "playwright_page_methods": [PageMethod(wait_hydrated, selector, timeout)],
+    }
 
 DB_PATH = "lore.db"
 DB_REPO = os.environ.get("LORE_DB_REPO", "Fran-Rg/leaguelore")
@@ -139,6 +177,32 @@ class LeagueloreCharacterSpider(scrapy.Spider):
         self.cur.execute("select * from stories where url = ?", (url,))
         return self.cur.fetchone()
 
+    def retry_on_failure(self, failure):
+        """Retry requests that never produced a response (e.g. wait_for_selector timeout)."""
+        request = failure.request
+        retry_count = request.cb_kwargs.get("retry_count", 0)
+        if retry_count >= MAX_RETRY_COUNT:
+            logging.error(
+                "Gave up after %s retries on '%s': %s",
+                retry_count,
+                request.url,
+                failure.value,
+            )
+            return
+        logging.warning(
+            "Request failed (%s), clearing cache and retrying (%s): %s",
+            failure.value,
+            retry_count + 1,
+            request.url,
+        )
+        self.drop_cache(request)
+        selector = request.meta.get("wait_selector", STORY_SELECTOR)
+        yield request.replace(
+            cb_kwargs=request.cb_kwargs | {"retry_count": retry_count + 1},
+            meta=request.meta | page_meta(selector, retry_count + 1),
+            dont_filter=True,
+        )
+
     def build_db(self):
         fetch_db()
         self.con = sqlite3.connect(DB_PATH)
@@ -180,23 +244,19 @@ class LeagueloreCharacterSpider(scrapy.Spider):
         self.build_db()
         time.sleep(1)
         for lang in LANGS:
-            if DEBUG and lang != "en_US":
+            if DEBUG and lang != "pl_PL":
                 continue  # DEBUG
             yield scrapy.Request(
                 "https://yz.lol.qq.com/zh_CN/champions/"
                 if lang == "zh_CN"
                 else "https://universe.leagueoflegends.com/%s/champions/" % lang,
                 cb_kwargs={"lang": lang},
-                meta={
-                    "playwright": True,
-                    "playwright_page_methods": [
-                        PageMethod("wait_for_load_state", "domcontentloaded"),
-                        PageMethod("wait_for_timeout", 2000),
-                    ],
-                },
+                errback=self.retry_on_failure,
+                meta=page_meta(CHAMP_LIST_SELECTOR),
             )
 
     def parse(self, response, **kwargs):
+        kwargs.pop("retry_count", None)
         logging.info("[%s]Starting Champions Lore Parsing", kwargs["lang"])
         champ_blocks = response.css("li.item_30l8")
         if len(champ_blocks) == 0:
@@ -216,26 +276,19 @@ class LeagueloreCharacterSpider(scrapy.Spider):
                     champ_page,
                     cb_kwargs=cb_kwargs,
                     callback=self.parse_champion,
-                    meta={
-                        "playwright": True,
-                        "playwright_page_methods": [
-                            PageMethod("wait_for_load_state", "domcontentloaded"),
-                            PageMethod("wait_for_timeout", 2000),
-                        ],
-                    },
+                    errback=self.retry_on_failure,
+                    meta=page_meta(CHAMP_PAGE_SELECTOR),
                 )
 
     def parse_champion(self, response, **kwargs):
         retry_count = kwargs.pop("retry_count", 0)
-        # Riot serves valid champion pages with a 404 status, so only trust the in-page marker
+        # A lingering 404 module means the page never resolved to a real champion
         is_404 = response.css("h3.code_Xnqs::text").get() == "404"
-        # The region module is sometimes missing when the page hasn't finished hydrating
-        is_incomplete = (
-            not response.css(".factionText_EnRL h6 span::text").get()
-            and not response.css("a.link_3m7v")
+        is_incomplete = not response.css(".biographyText_3-to") and not response.css(
+            ".typeDescription_ixWu"
         )
         if is_404 or is_incomplete:
-            if retry_count >= 5:
+            if retry_count >= MAX_RETRY_COUNT:
                 logging.error(
                     "[%s]Gave up after %s retries on incomplete page for '%s': %s",
                     kwargs["lang"],
@@ -256,15 +309,10 @@ class LeagueloreCharacterSpider(scrapy.Spider):
             yield scrapy.Request(
                 response.url,
                 callback=self.parse_champion,
+                errback=self.retry_on_failure,
                 cb_kwargs=kwargs | {"retry_count": retry_count + 1},
                 dont_filter=True,
-                meta={
-                    "playwright": True,
-                    "playwright_page_methods": [
-                        PageMethod("wait_for_load_state", "domcontentloaded"),
-                        PageMethod("wait_for_timeout", (retry_count + 1) * 1000),
-                    ],
-                },
+                meta=page_meta(CHAMP_PAGE_SELECTOR, retry_count + 1),
             )
             return
         ex_c = self.get_champion(kwargs["lang"], kwargs["champion"])
@@ -293,10 +341,20 @@ class LeagueloreCharacterSpider(scrapy.Spider):
                 response.css("li.quote_2507 p::text").get()
                 or response.css("li.quote_2507 p i::text").get()
             )
-            region = (
-                response.css(".factionText_EnRL h6 span::text").get()
-                or response.css("a.link_3m7v")[0].attrib["href"].split("/")[-2].title()
-            )
+            region = response.css(".factionText_EnRL h6 span::text").get()
+            if region is None:
+                faction_links = response.css("a.link_3m7v")
+                if faction_links:
+                    region = (
+                        faction_links[0].attrib["href"].split("/")[-2].title()
+                    )
+                else:
+                    logging.warning(
+                        "[%s]No region for '%s': %s",
+                        kwargs["lang"],
+                        kwargs["champion"],
+                        response.url,
+                    )
             champ_parse = {
                 "name": name,
                 "race": race,
@@ -338,14 +396,9 @@ class LeagueloreCharacterSpider(scrapy.Spider):
                 request = scrapy.Request(
                     bio_page,
                     callback=self.parse_bio,
+                    errback=self.retry_on_failure,
                     cb_kwargs=champ_parse,
-                    meta={
-                        "playwright": True,
-                        "playwright_page_methods": [
-                            PageMethod("wait_for_load_state", "domcontentloaded"),
-                            PageMethod("wait_for_timeout", 1000),
-                        ],
-                    },
+                    meta=page_meta(STORY_SELECTOR),
                 )
                 yield request
             else:
@@ -362,17 +415,13 @@ class LeagueloreCharacterSpider(scrapy.Spider):
             yield scrapy.Request(
                 story_page,
                 callback=self.parse_story,
+                errback=self.retry_on_failure,
                 cb_kwargs={"champion": kwargs["champion"], "lang": kwargs["lang"]},
-                meta={
-                    "playwright": True,
-                    "playwright_page_methods": [
-                        PageMethod("wait_for_load_state", "domcontentloaded"),
-                        PageMethod("wait_for_timeout", 1000),
-                    ],
-                },
+                meta=page_meta(STORY_SELECTOR),
             )
 
     def parse_bio(self, response, **kwargs):
+        kwargs.pop("retry_count", None)
         # bio = "".join(i.get() for i in response.xpath('//*[@id="CatchElement"]/*'))
         bio = response.css(".root_3nvd.dark_1RHo").get()
         if bio is None:
@@ -414,21 +463,16 @@ class LeagueloreCharacterSpider(scrapy.Spider):
             yield scrapy.Request(
                 response.urljoin(story_url),
                 callback=self.parse_story,
+                errback=self.retry_on_failure,
                 cb_kwargs={"champion": kwargs["champion"], "lang": kwargs["lang"]},
-                meta={
-                    "playwright": True,
-                    "playwright_page_methods": [
-                        PageMethod("wait_for_load_state", "domcontentloaded"),
-                        PageMethod("wait_for_timeout", 1000),
-                    ],
-                },
+                meta=page_meta(STORY_SELECTOR),
             )
 
     def parse_story(self, response, **kwargs):
         retry_count = kwargs.pop("retry_count", 0)
         content = response.css(".root_3nvd.dark_1RHo").get()
         if content is None:
-            if retry_count >= 5:
+            if retry_count >= MAX_RETRY_COUNT:
                 logging.error(
                     "[%s]Gave up after %s retries on empty story: %s",
                     kwargs["lang"],
@@ -446,15 +490,10 @@ class LeagueloreCharacterSpider(scrapy.Spider):
             yield scrapy.Request(
                 response.url,
                 callback=self.parse_story,
+                errback=self.retry_on_failure,
                 cb_kwargs=kwargs | {"retry_count": retry_count + 1},
                 dont_filter=True,
-                meta={
-                    "playwright": True,
-                    "playwright_page_methods": [
-                        PageMethod("wait_for_load_state", "domcontentloaded"),
-                        PageMethod("wait_for_timeout", 1000),
-                    ],
-                },
+                meta=page_meta(STORY_SELECTOR, retry_count + 1),
             )
             return
 
