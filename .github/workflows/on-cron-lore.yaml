@@ -27,6 +27,7 @@ jobs:
           python-version: "3.12"
 
       - name: Requirements
+        id: requirements
         run: |
           chmod +x ./install.sh
           ./install.sh
@@ -47,7 +48,7 @@ jobs:
           echo "NEW_CHAMP_COUNT=$(jq -r '.champ_count' meta.json)" >> "$GITHUB_OUTPUT"
 
       - name: Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: "League of Legends lore - ${{ steps.kindle.outputs.NEW_CHAMP_COUNT }} Champions - ${{ steps.requirements.outputs.TODAYDATE }}"
           tag_name: "lollore-${{ steps.kindle.outputs.NEW_CHAMP_COUNT }}-${{ steps.requirements.outputs.TODAYDATE }}"
