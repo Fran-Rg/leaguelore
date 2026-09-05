@@ -17,12 +17,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        # https://github.com/actions/checkout/tags
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           persist-credentials: true
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v7
+        # https://github.com/actions/setup-python/tags
         with:
           python-version: "3.12"
 
@@ -35,11 +37,11 @@ jobs:
 
       - name: Run scrapper
         id: scrapy
-        env:
-          DEBUG: 1
         run: |
           chmod +x ./scrap.sh
           ./scrap.sh
+        # env:
+        #   DEBUG: 1
 
       - name: Run kindler
         id: kindle
@@ -48,6 +50,7 @@ jobs:
           echo "NEW_CHAMP_COUNT=$(jq -r '.champ_count' meta.json)" >> "$GITHUB_OUTPUT"
 
       - name: Release
+        # https://github.com/softprops/action-gh-release/tags
         uses: softprops/action-gh-release@v3
         with:
           name: "League of Legends lore - ${{ steps.kindle.outputs.NEW_CHAMP_COUNT }} Champions - ${{ steps.requirements.outputs.TODAYDATE }}"
