@@ -27,20 +27,20 @@ TRANSLATIONS = {
     #     "bio": "Βιογραφία",
     #     "story": "Ιστορία",
     # },
-    # "es_ES": {
-    #     "region": "Región",
-    #     "role": "Role",
-    #     "related": "Relacionado",
-    #     "bio": "Biografía",
-    #     "story": "Historia",
-    # },
-    # "fr_FR": {
-    #     "region": "Région",
-    #     "role": "Rôle",
-    #     "related": "En rapport",
-    #     "bio": "Biographie",
-    #     "story": "Histoire",
-    # },
+    "es_ES": {
+        "region": "Región",
+        "role": "Role",
+        "related": "Relacionado",
+        "bio": "Biografía",
+        "story": "Historia",
+    },
+    "fr_FR": {
+        "region": "Région",
+        "role": "Rôle",
+        "related": "En rapport",
+        "bio": "Biographie",
+        "story": "Histoire",
+    },
     # "hu_HU": {
     #     "region": "Vidék",
     #     "role": "Szerep",
@@ -48,13 +48,13 @@ TRANSLATIONS = {
     #     "bio": "Életrajz",
     #     "story": "Sztori",
     # },
-    # "it_IT": {
-    #     "region": "Regione",
-    #     "role": "Ruolo",
-    #     "related": "Imparentato",
-    #     "bio": "Biografia",
-    #     "story": "Storia",
-    # },
+    "it_IT": {
+        "region": "Regione",
+        "role": "Ruolo",
+        "related": "Imparentato",
+        "bio": "Biografia",
+        "story": "Storia",
+    },
     # "ja_JP": {
     #     "region": "地域",
     #     "role": "役割",
@@ -62,13 +62,13 @@ TRANSLATIONS = {
     #     "bio": "バイオグラフィー",
     #     "story": "話",
     # },
-    # "ko_KR": {
-    #     "region": "지역",
-    #     "role": "역할",
-    #     "related": "관련된",
-    #     "bio": "전기",
-    #     "story": "이야기",
-    # },
+    "ko_KR": {
+        "region": "지역",
+        "role": "역할",
+        "related": "관련된",
+        "bio": "전기",
+        "story": "이야기",
+    },
     # # "ms_MY": { # Too many missing ones
     # #     "region": "Wilayah",
     # #     "role": "Peranan",
@@ -132,14 +132,14 @@ TRANSLATIONS = {
     #     "bio": "傳",
     #     "story": "故事",
     # },
-    # "zh_CN": {
-    #     "region": "地区",
-    #     "role": "角色",
-    #     "related": "有关的",
-    #     "bio": "传",
-    #     "story": "故事",
-    # },
+    "zh_CN": {
+        "region": "地区",
+        "role": "角色",
+        "related": "有关的",
+        "bio": "传",
+        "story": "故事",
+        "domain": "yz.lol.qq.com",
+    },
 }
 
-# LANGS = ["en_US"]
 LANGS = list(TRANSLATIONS.keys())
